@@ -1,5 +1,6 @@
 const CLIENT_ID = "844874dd7c9e407ea670623190f7143e";
-const SCOPES = "user-modify-playback-state";
+const SCOPES =
+  "user-modify-playback-state user-read-playback-state user-read-currently-playing";
 const REDIRECT_URI = "http://localhost:8080";
 
 const appConfig = {
@@ -11,6 +12,8 @@ const appConfig = {
   setAccessToken: (value) => localStorage.setItem("access_token", value),
   getRefreshToken: () => localStorage.getItem("refresh_token"),
   setRefreshToken: (value) => localStorage.setItem("refresh_token", value),
+  getScopes: () => localStorage.getItem("scopes"),
+  setScopes: (value) => localStorage.setItem("scopes", value),
 };
 
 async function authorizeSpotify(verifier, state) {
@@ -48,6 +51,8 @@ async function makeTokenRequest(requestData) {
   const result = await response.json();
   appConfig.setAccessToken(result.access_token);
   appConfig.setRefreshToken(result.refresh_token);
+  console.log(result);
+  appConfig.setScopes(result.scope);
 }
 
 async function requestToken(code) {
@@ -103,12 +108,17 @@ async function generateChallenge(verifier) {
   return base64encoded;
 }
 
-async function makeSpotifyRequest(url) {
+async function makeSpotifyRequest(url, options = {}) {
   const response = await fetch(url, {
     headers: {
       Authorization: `Bearer ${appConfig.getAccessToken()}`,
     },
+    ...options,
   });
+
+  if (response.status === 204) {
+    return;
+  }
 
   const data = await response.json();
 
@@ -126,13 +136,56 @@ async function makeSpotifyRequest(url) {
 }
 
 async function authorizationComplete() {
-  const result = await makeSpotifyRequest("https://api.spotify.com/v1/me");
+  const profile = await makeSpotifyRequest("https://api.spotify.com/v1/me");
 
-  console.log(result);
+  console.log(profile);
 
-  document.getElementsByClassName(
+  document.getElementById(
     "test-content"
-  )[0].innerHTML = `<p>Hi <a href="${result.external_urls.spotify}" target="_blank">${result.display_name}</a>!</p>`;
+  ).innerHTML = `<p>Hi <a href="${profile.external_urls.spotify}" target="_blank">${profile.display_name}</a>!</p>`;
+
+  const searchResult = await makeSpotifyRequest(
+    "https://api.spotify.com/v1/search?q=amsterdam%20gregory&type=track&limit=1"
+  );
+  const track = searchResult.tracks.items[0];
+  console.log(track);
+
+  const devices = await makeSpotifyRequest(
+    "https://api.spotify.com/v1/me/player/devices"
+  );
+  console.log(devices);
+
+  await makeSpotifyRequest(
+    `https://api.spotify.com/v1/me/player/play?device_id=${devices.devices[0].id}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        uris: [track.uri],
+      }),
+    }
+  );
+
+  //
+  setInterval(async () => {
+    const status = await makeSpotifyRequest(
+      `https://api.spotify.com/v1/me/player`
+    );
+    scrubControl.value = status.progress_ms;
+  }, 500);
+
+  // Add slider
+  const scrubControl = document.getElementById("scrub-control");
+  scrubControl.removeAttribute("disabled");
+  scrubControl.setAttribute("max", track.duration_ms);
+
+  scrubControl.addEventListener("change", (event) => {
+    makeSpotifyRequest(
+      `https://api.spotify.com/v1/me/player/seek?position_ms=${event.target.value}`,
+      {
+        method: "PUT",
+      }
+    );
+  });
 }
 
 async function initialize() {
@@ -140,11 +193,13 @@ async function initialize() {
   const codeParam = urlParams.get("code");
   const stateParam = urlParams.get("state");
 
-  if (appConfig.getAccessToken()) {
+  if (appConfig.getAccessToken() && appConfig.getScopes() === SCOPES) {
     console.log("Existing token found");
     authorizationComplete();
   } else if (codeParam) {
     if (stateParam && stateParam === appConfig.getState()) {
+      // Clear search params
+      window.history.replaceState(null, null, window.location.pathname);
       try {
         await requestToken(codeParam);
         authorizationComplete();
@@ -157,7 +212,7 @@ async function initialize() {
       );
     }
   } else {
-    console.log("No token found, initiating authorization");
+    console.log("No token found or scope mismatch, initiating authorization");
     const verifier = generateRandomString(64);
     appConfig.setVerifier(verifier);
 
